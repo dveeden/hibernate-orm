@@ -96,7 +96,7 @@ public class TiDBDialect extends MySQLDialect {
 	protected void registerDefaultKeywords() {
 		super.registerDefaultKeywords();
 
-		if (getMySQLVersion().isBefore(8,0)) {
+		if ( getMySQLVersion().isBefore( 8, 0 ) ) {
 			// TiDB implemented 'Window Functions' of MySQL 8, even in TiDB versions that identify as 5.7
 			// so the following keywords are reserved.
 			registerKeyword( "CUME_DIST" );
