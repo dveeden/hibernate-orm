@@ -19,10 +19,16 @@ import org.hibernate.testing.orm.junit.SessionFactoryScope;
 import org.hibernate.testing.orm.junit.SkipForDialect;
 import org.junit.jupiter.api.Test;
 
+import java.sql.SQLException;
 import java.time.Duration;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ExecutionException;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.fail;
 
 /**
@@ -197,6 +203,62 @@ public class ConnectionLockTimeoutTests {
 			finally {
 				connectionStrategy.setLockTimeout( Timeout.milliseconds( initialValue ), conn, session.getFactory() );
 			}
+		} ) );
+	}
+
+	@Test
+	void testLockWaitTimeout(SessionFactoryScope factoryScope) {
+		factoryScope.inTransaction( (session) -> session.doWork( (conn) -> {
+			conn.prepareStatement("DROP TABLE IF EXISTS t_testLockWaitTimeout").executeUpdate();
+			conn.prepareStatement("CREATE TABLE t_testLockWaitTimeout (id int PRIMARY KEY)").executeUpdate();
+			conn.prepareStatement("INSERT INTO t_testLockWaitTimeout VALUES (1),(2),(3)").executeUpdate();
+			conn.commit();
+		} ));
+
+		Runnable c1 = () -> {
+			factoryScope.inTransaction( (session) -> session.doWork( (conn) -> {
+				try {
+					conn.setAutoCommit(false);
+					conn.prepareStatement("UPDATE t_testLockWaitTimeout SET id=20 WHERE id=2").executeUpdate();
+					Thread.sleep(30_000);
+					conn.rollback();
+				}
+				catch (SQLException e) {
+					throw new RuntimeException("Unexpected SQLException in c1: " + e);
+				}
+				catch (InterruptedException ignore) { }
+			} ) );
+		};
+
+		Runnable c2 = () -> {
+			factoryScope.inTransaction( (session) -> session.doWork( (conn) -> {
+				final ConnectionLockTimeoutStrategy connectionStrategy = session.getDialect().getLockingSupport().getConnectionLockTimeoutStrategy();
+				connectionStrategy.setLockTimeout( Timeout.seconds( 10 ), conn, session.getFactory() );
+				try {
+					Thread.sleep(5_000);
+					conn.prepareStatement("UPDATE t_testLockWaitTimeout SET id=id+100").executeUpdate();
+				}
+				catch (SQLException e) {
+					throw new RuntimeException( e);
+				}
+				catch (InterruptedException ignore) { }
+			} ) );
+		};
+
+		ExecutorService executor = Executors.newFixedThreadPool(2);
+
+		Future<?> f1 = executor.submit(c1);
+		Future<?> f2 = executor.submit(c2);
+
+		assertThatThrownBy(() -> f2.get())
+				.isInstanceOf(ExecutionException.class)
+				.hasCauseInstanceOf(RuntimeException.class)
+				.cause()
+				.hasCauseInstanceOf(SQLException.class);
+
+		factoryScope.inTransaction( (session) -> session.doWork( (conn) -> {
+			connectionStrategy.setLockTimeout( Timeout.seconds( 60 ), conn, session.getFactory() );
+			conn.prepareStatement("DROP TABLE IF EXISTS t_testLockWaitTimeout").executeUpdate();
 		} ) );
 	}
 }
